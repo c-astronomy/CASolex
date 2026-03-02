@@ -1,5 +1,8 @@
 # CASolex
 Python based Solex made with AI
+![image](https://github.com/c-astronomy/CASolex/blob/main/2026-03-02-094052_hyprshot.png)
+![ikmage](https://github.com/c-astronomy/CASolex/blob/main/2026-03-02-094114_hyprshot.png)
+![image](https://github.com/c-astronomy/CASolex/blob/main/2026-03-02-085257_hyprshot.png)
 
 If you want to continue the project, heres some guidelines:
 100% python
