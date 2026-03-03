@@ -121,7 +121,8 @@ class PySolexUI(QMainWindow):
             view_box.setYRange(0, 83 * aspect, padding=0)
 
 
-
+    def update_rotation_label(self, value):
+        self.rotation_label.setText(f"Rotation: {value}°")
 
 
 
@@ -172,16 +173,30 @@ class PySolexUI(QMainWindow):
 
         # ... inside your processing layout ...
         self.ratio_slider = QSlider(Qt.Horizontal)
-        self.ratio_slider.setRange(1, 1000) # 0.1x to 50x
-        self.ratio_slider.setValue(4360)    # Default 1.0x
+        self.ratio_slider.setRange(50, 200) # 0.1x to 50x
+        self.ratio_slider.setValue(108)    # Default 1.0x
 
         
         # X-Position Slider (to tune the wavelength)
         self.x_slider = QSlider(Qt.Horizontal)
-        self.x_slider.setRange(0, 4660) # Match your sensor width
+        self.x_slider.setRange(0, 3056) # Match your sensor width
         self.x_slider.setValue(656)
         #self.x_slider.valueChanged.connect(self.run_reconstruction) # Re-run on move
         self.ratio_slider.valueChanged.connect(self.update_aspect_from_slider)
+
+
+# Rotation Slider (Add this near your other controls)
+        self.rotation_label = QLabel("Rotation: 0°")
+        self.rotation_slider = QSlider(Qt.Horizontal)
+        self.rotation_slider.setRange(-15, 15)  # Most tilts are within 15 degrees
+        self.rotation_slider.setValue(0)
+        self.rotation_slider.valueChanged.connect(self.update_rotation_label)
+        self.rotation_slider.sliderReleased.connect(self.run_reconstruction) # Trigger rebuild
+
+# Layout (Add to your existing layout)
+        controls.addWidget(self.rotation_label)
+        controls.addWidget(self.rotation_slider)
+
 
 
         # Add this near your Reconstruct button
@@ -238,43 +253,30 @@ class PySolexUI(QMainWindow):
         layout.addLayout(display_layout, 4)
 
     def select_ser_file(self):
-            file_path, _ = QFileDialog.getOpenFileName(self, "Open SER Scan", "", "SER Files (*.ser)")
-            if file_path:
-                self.current_ser_path = file_path
-                
-                # 1. Initialize the Reconstructor for later use
-                from app.core.reconstructor import SHGReconstructor
-                self.reconstructor = SHGReconstructor(file_path)
-                
-                # 2. Use the SERReader to get metadata for the UI
-                from app.core.ser_reader import SERReader
-                reader = SERReader(file_path)
-                
-                # CALCULATE RATIO: 3618 frames / 83 height = ~43.6
-                # Use the calculated values directly from the reader
-                #height = reader.frame_shape[0] # You can also use reader.frame_shape[0] if it's reliable
-                height = 83 # You can also use reader.frame_shape[0] if it's reliable
-                #height = 83 # You can also use reader.frame_shape[0] if it's reliable
-                auto_aspect = (reader.frame_count / height) if reader.frame_count > 0 else 1.0
-                
-                # Update UI controls - Use speed_input as verified earlier
-                if hasattr(self, 'speed_input'):
-                    self.speed_input.setText(f"{auto_aspect:.1f}")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open SER Scan", "", "SER Files (*.ser)")
+        if file_path:
+            self.current_ser_path = file_path
+            self.reconstructor = SHGReconstructor(file_path)
+            
+            from app.core.ser_reader import SERReader
+            reader = SERReader(file_path) # Should be updated to width 3056
+            
+            # Update X-Slider to the real sensor width
+            self.x_slider.setRange(0, 3056)
+            
+            # Update Aspect Ratio Slider based on log data (1.08)
+            # 1.08 * 100 = 108
+            self.ratio_slider.setValue(108) 
 
-                # Setup Spectrum View (Top)
-                # Use the reader to get the first frame for the preview
-                first_frame = reader.get_frame(0)
-                self.spectrum_view.getView().setAspectLocked(False)
-                self.spectrum_view.setImage(first_frame.T)
-                self.spectrum_view.autoLevels() 
-                
-                # Setup Sun View (Bottom)
-                # Unlocking the view allows the aspect ratio to stretch the 83px height
-                self.sun_view.getView().setAspectLocked(False)
-                
-                self.reconstruct_btn.setEnabled(True)
-                self.status_bar.showMessage(f"Loaded: {file_path}")
-
+            # Setup Spectrum View
+            first_frame = reader.get_frame(0)
+            self.spectrum_view.getView().setAspectLocked(False)
+            self.spectrum_view.setImage(first_frame.T)
+            self.spectrum_view.autoLevels() 
+            
+            self.sun_view.getView().setAspectLocked(False)
+            self.reconstruct_btn.setEnabled(True)
+            self.status_bar.showMessage(f"Loaded: 3056x128 | Frames: {reader.frame_count}")
 
 
     def run_reconstruction(self):
@@ -284,7 +286,11 @@ class PySolexUI(QMainWindow):
             
             # 2. run the processing (the "stacking" of 3,618 slits)
             raw_sun = self.reconstructor.process(line_x)
-            
+
+            #rotation 
+            rotation_val = self.rotation_slider.value()
+            #rotation_deg = rotation_val
+
             # 3. update the display
             self.sun_view.setImage(raw_sun)
             
@@ -311,11 +317,11 @@ class PySolexUI(QMainWindow):
                 current_aspect = stretch_val
                 # apply the stretch to the 83-pixel height
                 # this turns the "barcode" into a circle based on your slider
-                view_box.setYRange(0, 83 * stretch_val, padding=0)
+                view_box.setYRange(0, 3056 * stretch_val, padding=0)
                 
             except ValueError:
                 # fallback if the text box is empty or invalid
-                view_box.setYRange(0, 83 * 43.6, padding=0)
+                view_box.setYRange(0, 3056 * 43.6, padding=0)
 
             self.status_bar.showMessage(f"reconstructed at x: {line_x}")
 
