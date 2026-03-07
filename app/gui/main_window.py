@@ -59,6 +59,146 @@ class PySolexUI(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
+        self.sun_view.getView().scene().sigMouseClicked.connect(self.on_sun_clicked)
+
+
+
+
+
+    def run_composite_reconstruction(self):
+            try:
+                self.status_bar.showMessage("Starting Composite: Step 1/2 (Photosphere)...")
+                # Step 1: Reconstruct the Photosphere (6560.0)
+                pixel_6562 = self.reconstructor.wavelength_to_pixel(6562.81)
+                photo_data = self.reconstructor.process(pixel_6562, rotation_deg=self.rotation_slider.value())
+
+                self.status_bar.showMessage("Starting Composite: Step 2/2 (Chromosphere)...")
+                # Step 2: Reconstruct the Chromosphere (6563.0)
+                pixel_6563 = self.reconstructor.wavelength_to_pixel(6563.0)
+                chromo_data = self.reconstructor.process(pixel_6563, rotation_deg=self.rotation_slider.value())
+
+                # Step 3: Blend them (50/50 mix)
+                # You can adjust the weights (0.5, 0.5) to favor one layer
+                composite = cv2.addWeighted(photo_data, 0.5, chromo_data, 0.5, 0)
+
+                # Step 4: Save to the class and update UI
+                self.current_recon_data = composite
+                #self.apply_visual_filters()
+                self.sun_view.setImage(self.current_recon_data, autoLevels=True)   
+
+
+
+
+                self.status_bar.showMessage("Composite Reconstruction Complete!")
+
+            except Exception as e:
+                self.status_bar.showMessage(f"Composite Error: {e}")
+
+
+
+
+
+
+
+    def update_scan_preview(self, frame, frame_idx):
+            # 1. Prepare data
+            data = frame.T.astype(np.float32)
+            avg_brightness = np.mean(data) # Check how much light is in the slit
+            
+            # 2. Logic to "Lock" the display levels
+            # If we haven't locked levels yet AND we see enough light (e.g. > 10)
+            # Or if it's just the very first frame to get the shape right
+            if not hasattr(self, 'levels_locked') or frame_idx == 0:
+                self.spectrum_view.setImage(data, autoLevels=True)
+                self.spectrum_view.getView().setAspectLocked(False)
+                self.spectrum_view.autoRange()
+                
+                # Only "Lock" the levels once we are sure we are looking at the Sun
+                # (Adjust '10' based on your camera's dark noise)
+                if avg_brightness > 10: 
+                    self.current_levels = self.spectrum_view.getHistogramWidget().getLevels()
+                    self.levels_locked = True 
+            else:
+                # Once locked, we use the same levels for the rest of the scan
+                # This keeps the H-alpha line stable and prevents over-exposure
+                self.spectrum_view.setImage(data, autoLevels=False, levels=self.current_levels)
+
+            # 3. Standard UI updates
+            self.status_bar.showMessage(f"Scanning: Frame {frame_idx} (Brightness: {avg_brightness:.1f})")
+            if hasattr(self, 'progress_bar'):
+                self.progress_bar.setValue(frame_idx)
+                
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+
+
+
+
+
+
+
+
+
+
+#    def update_scan_preview(self, frame, frame_idx):
+#            # 1. Update the top window with the current raw frame
+#            # We use .T to orient it horizontally like the final Sun
+#            self.spectrum_view.setImage(frame.T, autoLevels=False) 
+#            
+#            # 2. Update the status bar to show progress
+#            self.status_bar.showMessage(f"Scanning Sun... Frame {frame_idx}/3618")
+#            
+#            # 3. Force the UI to refresh immediately
+#            from PySide6.QtWidgets import QApplication
+#            QApplication.processEvents()
+#
+
+
+
+
+
+
+
+    def on_sun_clicked(self, event):
+        if event.button() == Qt.LeftButton:
+            view_box = self.sun_view.getView()
+            pos = event.scenePos()
+            
+            if view_box.sceneBoundingRect().contains(pos):
+                mouse_point = view_box.mapSceneToView(pos)
+                
+                # The X-coordinate on the Sun corresponds to the Frame Index
+                frame_idx = int(mouse_point.x())
+                
+                # Constrain to valid frame range
+                frame_idx = max(0, min(frame_idx, self.reconstructor.reader.frame_count - 1))
+                
+                # Load that specific raw frame and show it
+                raw_frame = self.reconstructor.reader.get_frame(frame_idx)
+                
+                # Transpose for correct orientation and set image
+                self.spectrum_view.setImage(raw_frame.T)
+                self.spectrum_view.autoLevels()
+                self.status_bar.showMessage(f"Viewing Raw Frame #{frame_idx}")
+
+
+
+
+    def adjust_wavelength(self, delta):
+        try:
+            current = float(self.line_x_input.text().replace(',', '.'))
+            new_val = round(current + delta, 2)
+            self.line_x_input.setText(str(new_val))
+            self.run_reconstruction()
+        except ValueError:
+            pass
+
+    def set_preset(self, value):
+        self.line_x_input.setText(str(value))
+        self.run_reconstruction()
+
+
+
 
 
     def auto_geometry_fix(self):
@@ -162,7 +302,7 @@ class PySolexUI(QMainWindow):
         self.load_ser_btn = QPushButton("LOAD .SER FILE")
         self.load_ser_btn.clicked.connect(self.select_ser_file)
         
-        self.line_x_input = QLineEdit("656")
+        self.line_x_input = QLineEdit("6562.81")
         proc_layout.addRow(self.load_ser_btn)
         proc_layout.addRow("Spectral Line X:", self.line_x_input)
 
@@ -198,6 +338,52 @@ class PySolexUI(QMainWindow):
         controls.addWidget(self.rotation_slider)
 
 
+# --- Wavelength Control Group ---
+        wave_group = QGroupBox("Wavelength Tuning (Å)")
+        wave_layout = QVBoxLayout()
+
+        # Input and Fine-Tune Row
+        tune_layout = QHBoxLayout()
+        self.line_x_input = QLineEdit("6562.81")  # Default to Core  Chromosphere
+        #self.btn_minus = QPushButton("-0.01")
+        #self.btn_plus = QPushButton("+0.01")
+        self.line_x_input_two = QLineEdit("6563")  # Default to Surface  Prothosphere
+
+        #tune_layout.addWidget(self.btn_minus)
+        tune_layout.addWidget(self.line_x_input)
+        #tune_layout.addWidget(self.btn_plus)
+        tune_layout.addWidget(self.line_x_input_two)
+        wave_layout.addLayout(tune_layout)
+
+        # Quick Presets
+        preset_layout = QHBoxLayout()
+        #self.btn_blue_wing = QPushButton("Blue Wing")
+        self.btn_core = QPushButton("H-α Core")
+        #self.btn_red_wing = QPushButton("Red Wing")
+        self.btn_protosphere = QPushButton("H-α Protosphere")
+
+
+        #preset_layout.addWidget(self.btn_blue_wing)
+        preset_layout.addWidget(self.btn_core)
+        #preset_layout.addWidget(self.btn_red_wing)
+        preset_layout.addWidget(self.btn_protosphere)
+        wave_layout.addLayout(preset_layout)
+
+        wave_group.setLayout(wave_layout)
+        controls.addWidget(wave_group)
+
+        # --- Connections ---
+        #self.btn_minus.clicked.connect(lambda: self.adjust_wavelength(-0.01))
+        #self.btn_plus.clicked.connect(lambda: self.adjust_wavelength(0.01))
+        #self.btn_blue_wing.clicked.connect(lambda: self.set_preset(6562.3))
+        self.btn_core.clicked.connect(lambda: self.set_preset(6562.81))
+        #self.btn_red_wing.clicked.connect(lambda: self.set_preset(6563.3))
+        self.btn_protosphere.clicked.connect(lambda: self.set_preset(6563))
+
+
+
+
+
 
         # Add this near your Reconstruct button
         self.autofix_btn = QPushButton("AUTO-FIX GEOMETRY")
@@ -207,6 +393,15 @@ class PySolexUI(QMainWindow):
         proc_layout.addRow(self.autofix_btn)
 
 
+
+
+
+        #I WILL HIDE THIS BUTTON FOR NOW
+        # Save the view  image Button  naming is a bit backwards atm
+        #self.save_edited_btn = QPushButton("SAVE PROCESSED IMAGE")
+        #self.save_edited_btn.clicked.connect(self.save_image)
+        #self.save_edited_btn.setStyleSheet("background-color: #004d40; color: white;")
+        #proc_layout.addWidget(self.save_edited_btn)
 
 
         # Save Button
@@ -232,12 +427,19 @@ class PySolexUI(QMainWindow):
         
         # A view to see the frame and pick the line
         self.spectrum_view = pg.ImageView()
+        self.spectrum_view.setFixedHeight(150) # Make it a slim "ribbon"
         self.spectrum_view.ui.roiBtn.hide()
+        self.spectrum_view.ui.menuBtn.hide()
 
-        #self.spectrum_view.viewBox().scene().sigMouseClicked.connect(self.on_spectrum_clicked)
+
         self.spectrum_view.getView().scene().sigMouseClicked.connect(self.on_spectrum_clicked)
-        #self.spectrum_view.viewBox().setAspectLocked(False)
-        #self.spectrum_view.scene().sigMouseClicked.connect(self.on_spectrum_clicked)
+
+
+        #COMPOSIT TEST
+        self.btn_composite = QPushButton("🎭 Create Composite (6562.81 + 6563)")
+        self.btn_composite.setStyleSheet("background-color: #4B0082; color: white; font-weight: bold; padding: 10px;")
+        self.btn_composite.clicked.connect(self.run_composite_reconstruction)
+        proc_layout.addRow(self.btn_composite) 
 
         
         # The final reconstructed Sun
@@ -251,6 +453,11 @@ class PySolexUI(QMainWindow):
 
         layout.addLayout(controls, 1)
         layout.addLayout(display_layout, 4)
+
+
+
+
+
 
     def select_ser_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open SER Scan", "", "SER Files (*.ser)")
@@ -282,10 +489,18 @@ class PySolexUI(QMainWindow):
     def run_reconstruction(self):
         try:
             # 1. get the x-line position
-            line_x = int(self.line_x_input.text())
-            
+            #line_x = int(self.line_x_input.text())
+            #raw_text = self.line_x_input.text().replace(',', '.') 
+            target_wl = float(self.line_x_input.text().replace(',', '.'))
+
+            #line_x = float(raw_text) # This allows 106.5 without crashing
+
+            # Convert that wavelength to the 105.x pixel coordinate
+            line_pixel = self.reconstructor.wavelength_to_pixel(target_wl)
+
             # 2. run the processing (the "stacking" of 3,618 slits)
-            raw_sun = self.reconstructor.process(line_x)
+            #raw_sun = self.reconstructor.process(line_x)
+            raw_sun = self.reconstructor.process(line_pixel, rotation_deg=self.rotation_slider.value(), callback=self.update_scan_preview)
 
             #rotation 
             rotation_val = self.rotation_slider.value()
@@ -323,7 +538,8 @@ class PySolexUI(QMainWindow):
                 # fallback if the text box is empty or invalid
                 view_box.setYRange(0, 3056 * 43.6, padding=0)
 
-            self.status_bar.showMessage(f"reconstructed at x: {line_x}")
+            #self.status_bar.showMessage(f"reconstructed at x: {line_x}")
+            self.status_bar.showMessage(f"Target: {target_wl}Å (Pixel: {line_pixel:.2f})")
 
         except Exception as e:
             print(f"detailed error: {e}")
@@ -474,49 +690,85 @@ class PySolexUI(QMainWindow):
         self.abort_btn.setEnabled(False)
         self.status_bar.showMessage("Ready for next scan.")
 
-    def save_processed_image(self):
-            # 1. Check if we actually have an image to save
-            if not hasattr(self, 'reconstructor') or self.reconstructor.reconstructed_image is None:
-                self.status_bar.showMessage("Error: No reconstructed image to save!")
+
+
+    #This naming of the two buttons will be confusing since its pretty much the other way around
+    def save_image(self):
+            if not hasattr(self, 'current_recon_data'):
+                self.status_bar.showMessage("Nothing to save!")
                 return
 
-            # 2. Open a file dialog to choose where to save
-            file_path, _ = QFileDialog.getSaveFileName(self, "Save Solar Image", "", "PNG Files (*.png);;TIFF Files (*.tiff)")
+            file_path, _ = QFileDialog.getSaveFileName(self, "Save Solar Image", "", "PNG Image (*.png);;TIFF Image (*.tiff)")
             
             if file_path:
-                try:
-                    import imageio
-                    import numpy as np
-                    import cv2
-                    # Get the raw data from your reconstructor
-                    data = self.reconstructor.reconstructed_image
+                # 1. Get the Raw Data (The "Default" Save)
+                raw_data = self.current_recon_data.copy()
+                
+                # 2. Apply the Inversion if the box is checked
+                if self.invert_check.isChecked():
+                    raw_data = 255 - raw_data
+
+                # 3. Apply the Sliders/Levels from the UI
+                # We grab the current "Black" and "White" points from the histogram
+                levels = self.sun_view.getHistogramWidget().getLevels()
+                black_point, white_point = levels
+                
+                # This "clips" the data to your slider positions
+                # and stretches it to fill the full 0-255 range
+                processed_img = np.clip(raw_data, black_point, white_point)
+                processed_img = ((processed_img - black_point) / (white_point - black_point) * 255).astype(np.uint8)
+
+                # 4. Save the "What You See" version
+                cv2.imwrite(file_path, processed_img)
+                
+                # 5. Optional: Save the "Scientific Raw" alongside it
+                raw_path = file_path.replace(".png", "_RAW.tiff").replace(".tiff", "_RAW.tiff")
+                cv2.imwrite(raw_path, raw_data.astype(np.uint16) * 256) # Save as 16-bit for science
+                
+                self.status_bar.showMessage(f"Saved: {file_path}")
+
+
+
+
+
+
+    def save_processed_image(self):
+        # 1. Validation
+        if not hasattr(self, 'reconstructor') or self.reconstructor.reconstructed_image is None:
+            self.status_bar.showMessage("Error: No reconstructed image to save!")
+            return
+
+        # 2. File Dialog
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Solar Image", "", "PNG Files (*.png);;TIFF Files (*.tiff)"
+        )
+        
+        if file_path:
+            try:
+                import cv2
+                import numpy as np
+                
+                # 3. Use the processed image from the reconstructor
+                # This image already has the 1.08 ratio and CLAHE applied
+                final_data = self.reconstructor.reconstructed_image
+                
+                # 4. Ensure it is in 8-bit format for standard PNG viewers
+                # If your reconstructor output is already uint8, this is safe
+                if final_data.dtype != np.uint8:
+                    final_data = cv2.normalize(final_data, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+                # 5. Save using OpenCV
+                # OpenCV uses BGR, but since this is Mono, it works perfectly for PNG/TIFF
+                success = cv2.imwrite(file_path, final_data)
+                
+                if success:
+                    self.status_bar.showMessage(f"Image successfully saved to: {file_path}")
+                else:
+                    self.status_bar.showMessage("Failed to write file. Check folder permissions.")
                     
-                    # Normalize the 12-bit/16-bit data to 8-bit for standard viewers
-                    img_min, img_max = data.min(), data.max()
-                    if img_max > img_min:
-                        normalized = ((data - img_min) / (img_max - img_min) * 255).astype(np.uint8)
-                    else:
-                        normalized = data.astype(np.uint8)
-                    
-
-                    # Apply the current stretch to the actual file
-                    stretch = self.ratio_slider.value() / 100.0
-                    new_h = int(83 * stretch)
-               
-
-                    norm = ((data - data.min()) / (data.max() - data.min()) * 255).astype(np.uint8)
-
-                    # Stretch the image data so the saved PNG is round
-                    final_img = cv2.resize(norm, (3618, new_h), interpolation=cv2.INTER_CUBIC)
-                    # Save the file
-                    #imageio.imsave(file_path, normalized)
-                    cv2.imwrite(file_path, final_img)
-                    self.status_bar.showMessage(f"Image saved to: {file_path}")
-                    
-                except Exception as e:
-                    self.status_bar.showMessage(f"Save Error: {e}")
-                    print(f"Detailed Save Error: {e}")
-
+            except Exception as e:
+                self.status_bar.showMessage(f"Save Error: {e}")
+                print(f"Detailed Save Error: {e}")
 
 
 
