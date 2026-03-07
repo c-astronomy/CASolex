@@ -321,12 +321,12 @@ class PySolexUI(QMainWindow):
         self.x_slider = QSlider(Qt.Horizontal)
         self.x_slider.setRange(0, 3056) # Match your sensor width
         self.x_slider.setValue(656)
-        #self.x_slider.valueChanged.connect(self.run_reconstruction) # Re-run on move
-        self.ratio_slider.valueChanged.connect(self.update_aspect_from_slider)
+        self.x_slider.valueChanged.connect(self.run_reconstruction) # Re-run on move
+        #self.ratio_slider.valueChanged.connect(self.update_aspect_from_slider)
 
 
 # Rotation Slider (Add this near your other controls)
-        self.rotation_label = QLabel("Rotation: 0°")
+        #self.rotation_label = QLabel("Rotation: 0°")
         self.rotation_slider = QSlider(Qt.Horizontal)
         self.rotation_slider.setRange(-15, 15)  # Most tilts are within 15 degrees
         self.rotation_slider.setValue(0)
@@ -334,8 +334,8 @@ class PySolexUI(QMainWindow):
         self.rotation_slider.sliderReleased.connect(self.run_reconstruction) # Trigger rebuild
 
 # Layout (Add to your existing layout)
-        controls.addWidget(self.rotation_label)
-        controls.addWidget(self.rotation_slider)
+        #controls.addWidget(self.rotation_label)
+        #controls.addWidget(self.rotation_slider)
 
 
 # --- Wavelength Control Group ---
@@ -410,11 +410,11 @@ class PySolexUI(QMainWindow):
         self.save_btn.setStyleSheet("background-color: #004d40; color: white;")
 
         # Add them to the layout
-        proc_layout.addRow("Wavelength (X):", self.x_slider)
+        #proc_layout.addRow("Wavelength (X):", self.x_slider)
         proc_layout.addRow(self.save_btn)
 
         
-        proc_layout.addRow("Aspect Ratio:", self.ratio_slider)
+        #proc_layout.addRow("Aspect Ratio:", self.ratio_slider)
 
         
         proc_layout.addRow(self.reconstruct_btn)
@@ -473,7 +473,7 @@ class PySolexUI(QMainWindow):
             
             # Update Aspect Ratio Slider based on log data (1.08)
             # 1.08 * 100 = 108
-            self.ratio_slider.setValue(108) 
+            #self.ratio_slider.setValue(108) 
 
             # Setup Spectrum View
             first_frame = reader.get_frame(0)
@@ -490,8 +490,9 @@ class PySolexUI(QMainWindow):
         try:
             # 1. get the x-line position
             #line_x = int(self.line_x_input.text())
-            #raw_text = self.line_x_input.text().replace(',', '.') 
-            target_wl = float(self.line_x_input.text().replace(',', '.'))
+            raw_text = self.line_x_input.text().replace(',', '.') 
+            #target_wl = float(self.line_x_input.text().replace(',', '.'))
+            target_wl = float(raw_text)
 
             #line_x = float(raw_text) # This allows 106.5 without crashing
 
