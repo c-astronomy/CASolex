@@ -1,4 +1,4 @@
-### CASolex
+# CASolex
 ## Python based Solex
 This program captures and reconstructs solar images made by scanning with spectroheliographs like the ml-700 shg. 
 
