@@ -5,7 +5,7 @@ import numpy as np
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QGroupBox, QComboBox, 
                              QLineEdit, QFormLayout, QStatusBar, QTabWidget, QFileDialog,
-                             QSlider, QApplication, QCheckBox)
+                             QSlider)
 from PySide6.QtCore import Qt, QThread, Signal
 
 # Internal Imports
@@ -95,53 +95,42 @@ class PySolexUI(QMainWindow):
                 self.status_bar.showMessage(f"Composite Error: {e}")
 
 
-    def show_calibration_frame(self):
-            if hasattr(self, 'reconstructor'):
-                raw_frame = self.reconstructor.get_raw_preview(500) # Get a frame from the middle
-                self.spectrum_view.setImage(raw_frame)
-                self.status_bar.showMessage("Viewing Raw Spectral Frame - Find the dark horizontal line!")
+
+
 
 
 
     def update_scan_preview(self, frame, frame_idx):
-            import pyqtgraph as pg # Ensure pg is available
-            
             # 1. Prepare data
             data = frame.T.astype(np.float32)
-            avg_brightness = np.mean(data)
+            avg_brightness = np.mean(data) # Check how much light is in the slit
             
-            # 2. Add or Update the Red Tuning Line
-            if not hasattr(self, 'tuning_line'):
-                # Create a red horizontal line that we can move
-                self.tuning_line = pg.InfiniteLine(angle=0, pen={'color': 'r', 'width': 2})
-                self.spectrum_view.addItem(self.tuning_line)
-            
-            # Sync the line position with your current text input
-            try:
-                current_y = float(self.line_x_input.text())
-                self.tuning_line.setValue(current_y)
-            except ValueError:
-                pass
-
-            # 3. Logic to "Lock" the display levels (Your existing code)
+            # 2. Logic to "Lock" the display levels
+            # If we haven't locked levels yet AND we see enough light (e.g. > 10)
+            # Or if it's just the very first frame to get the shape right
             if not hasattr(self, 'levels_locked') or frame_idx == 0:
                 self.spectrum_view.setImage(data, autoLevels=True)
                 self.spectrum_view.getView().setAspectLocked(False)
                 self.spectrum_view.autoRange()
                 
+                # Only "Lock" the levels once we are sure we are looking at the Sun
+                # (Adjust '10' based on your camera's dark noise)
                 if avg_brightness > 10: 
                     self.current_levels = self.spectrum_view.getHistogramWidget().getLevels()
                     self.levels_locked = True 
             else:
+                # Once locked, we use the same levels for the rest of the scan
+                # This keeps the H-alpha line stable and prevents over-exposure
                 self.spectrum_view.setImage(data, autoLevels=False, levels=self.current_levels)
 
-            # 4. Standard UI updates
+            # 3. Standard UI updates
             self.status_bar.showMessage(f"Scanning: Frame {frame_idx} (Brightness: {avg_brightness:.1f})")
             if hasattr(self, 'progress_bar'):
                 self.progress_bar.setValue(frame_idx)
                 
             from PySide6.QtWidgets import QApplication
             QApplication.processEvents()
+
 
 
 
@@ -170,146 +159,27 @@ class PySolexUI(QMainWindow):
 
 
 
-#    def on_sun_clicked(self, event):
-#        if event.button() == Qt.LeftButton:
-#            view_box = self.sun_view.getView()
-#            pos = event.scenePos()
-#            
-#            if view_box.sceneBoundingRect().contains(pos):
-#                mouse_point = view_box.mapSceneToView(pos)
-#                
-#                # The X-coordinate on the Sun corresponds to the Frame Index
-#                frame_idx = int(mouse_point.x())
-#                
-#                # Constrain to valid frame range
-#                frame_idx = max(0, min(frame_idx, self.reconstructor.reader.frame_count - 1))
-#                
-#                # Load that specific raw frame and show it
-#                raw_frame = self.reconstructor.reader.get_frame(frame_idx)
-#                
-#                # Transpose for correct orientation and set image
-#                self.spectrum_view.setImage(raw_frame.T)
-#                self.spectrum_view.autoLevels()
-#                self.status_bar.showMessage(f"Viewing Raw Frame #{frame_idx}")
-
-
-
-
-    def auto_tune_wavelength(self):
-        """Finds the core and updates UI without breaking math units."""
-        if not hasattr(self, 'reconstructor') or not hasattr(self.reconstructor, 'avg_frame'):
-            return
-
-        # 1. Find pixel core (e.g. 39.0)
-        best_pixel_y = self.reconstructor.find_absorption_core(self.reconstructor.avg_frame)
-        
-        # 2. Sync the Red Line (Fixes the AttributeError)
-        # We search for any InfiniteLine attached to the spectrum view
-        if hasattr(self, 'tuning_line'):
-            self.tuning_line.setValue(best_pixel_y)
-        elif hasattr(self, 'v_line'): # Check common alternative name
-            self.v_line.setValue(best_pixel_y)
-
-        # 3. Convert to Angstrom for UI display
-        # Uses the short axis (e.g. 128) to find the center
-        sensor_h = self.reconstructor.height if not self.reconstructor.needs_transpose else self.reconstructor.width
-        center_y = sensor_h / 2
-        display_angstrom = 6562.81 + (best_pixel_y - center_y) * 0.033
-        self.line_x_input.setText(f"{display_angstrom:.2f}")
-        
-        # 4. Run reconstruction using the pixel directly
-        self.run_reconstruction(override_pixel=best_pixel_y)
-
-    def run_reconstruction(self, override_pixel=None):
-        """Triggers processing and displays in sun_view."""
-        if not hasattr(self, 'reconstructor'):
-            return
-
-        # --- WHERE IS THE XY RATIO? ---
-        # It is pulled from your UI input box (self.xy_ratio_input)
-        try:
-            current_ratio = float(self.xy_ratio_input.text())
-            self.reconstructor.xy_ratio = current_ratio
-        except (ValueError, AttributeError):
-            # Fallback for vertical data (3056x128)
-            self.reconstructor.xy_ratio = 0.04 
-
-        # Determine Target
-        if override_pixel is not None:
-            tuning_val = float(override_pixel)
-        else:
-            try:
-                tuning_val = float(self.line_x_input.text())
-            except ValueError:
-                tuning_val = 6562.81
-
-        # Process
-        final_sun = self.reconstructor.process(
-            tuning_val, 
-            sharpen=self.sharpen_checkbox.isChecked(),
-            callback=self.update_scan_preview
-        )
-
-        # Display Result
-        if final_sun is not None:
-            # We know this exists from your __init__
-            self.sun_view.setImage(final_sun.T, autoLevels=True)
-            unit = "px" if tuning_val < 2000 else "Å"
-            self.status_bar.showMessage(f"Reconstruction Done | Target: {tuning_val:.2f}{unit}")
-
-
-
-
-
-
-
-
-
     def on_sun_clicked(self, event):
-            if event.button() == Qt.LeftButton:
-                view_box = self.sun_view.getView()
-                pos = event.scenePos()
+        if event.button() == Qt.LeftButton:
+            view_box = self.sun_view.getView()
+            pos = event.scenePos()
+            
+            if view_box.sceneBoundingRect().contains(pos):
+                mouse_point = view_box.mapSceneToView(pos)
                 
-                if view_box.sceneBoundingRect().contains(pos):
-                    mouse_point = view_box.mapSceneToView(pos)
-                    
-                    # Frame index corresponds to X coordinate on the reconstruction
-                    frame_idx = int(mouse_point.x())
-                    frame_idx = max(0, min(frame_idx, self.reconstructor.reader.frame_count - 1))
-                    
-                    try:
-                        # 1. Pull the raw frame using our updated SERReader
-                        raw_data = self.reconstructor.reader.get_frame(frame_idx)
-                        
-                        # 2. Use the CORRECTED width/height from the reader
-                        h = self.reconstructor.reader.height
-                        w = self.reconstructor.reader.width
-                        
-                        # 3. Reshape the flat data into the 2D view
-                        # Note: get_frame now returns the correct dtype/endianness
-                        frame = raw_data.reshape((h, w))
-                        
-                        # 4. Update the Top View
-                        # Transpose (.T) is required for pyqtgraph orientation
-                        self.spectrum_view.setImage(frame.T)
-                        
-                        # 5. FORCE AUTO-LEVELS: This fixes the "Grey Box"
-                        self.spectrum_view.autoLevels()
-                        
-                        self.status_bar.showMessage(f"Raw Frame #{frame_idx} | Format: {w}x{h}")
-                        
-                    except Exception as e:
-                        print(f"Preview error: {e}")
-
-
-
-
-
-
-
-
-
-
+                # The X-coordinate on the Sun corresponds to the Frame Index
+                frame_idx = int(mouse_point.x())
+                
+                # Constrain to valid frame range
+                frame_idx = max(0, min(frame_idx, self.reconstructor.reader.frame_count - 1))
+                
+                # Load that specific raw frame and show it
+                raw_frame = self.reconstructor.reader.get_frame(frame_idx)
+                
+                # Transpose for correct orientation and set image
+                self.spectrum_view.setImage(raw_frame.T)
+                self.spectrum_view.autoLevels()
+                self.status_bar.showMessage(f"Viewing Raw Frame #{frame_idx}")
 
 
 
@@ -441,18 +311,6 @@ class PySolexUI(QMainWindow):
         load_ser_group.setLayout(load_ser_layout)
 
 
-        # Raw oreview test thing,  Add this next to your Reconstruct button
-        self.btn_preview_raw = QPushButton("Show Raw Spectrum")
-        self.btn_preview_raw.clicked.connect(self.show_calibration_frame)
-        self.btn_preview_raw.setEnabled(True) # Enable after loading file
-        
-        # Add it to your layout (adjust based on your actual layout name)
-        #self.control_layout.addWidget(self.btn_preview_raw)
-
-
-
-
-
         #Controls
         controls = QVBoxLayout()
         proc_group = QGroupBox("Processing Controls")
@@ -536,7 +394,6 @@ class PySolexUI(QMainWindow):
         
         controls.addWidget(load_ser_group)
         controls.addWidget(wave_group)
-        controls.addWidget(self.btn_preview_raw)
 
         # --- Connections ---
         #self.btn_minus.clicked.connect(lambda: self.adjust_wavelength(-0.01))
@@ -619,22 +476,6 @@ class PySolexUI(QMainWindow):
 
 
 
-        # AUto find HA line
-        self.auto_tune_btn = QPushButton("Find H-alpha Core")
-        self.auto_tune_btn.clicked.connect(self.auto_tune_wavelength)
-        controls.addWidget(self.auto_tune_btn)
-
-
-
-
-
-
-
-        # Add the checkbox to your Processing Controls layout
-        self.sharpen_check = QCheckBox("Enable Solar Sharpening")
-        self.sharpen_check.setChecked(False)  # Default to off
-        controls.addWidget(self.sharpen_check) # Or add to your specific 'Processing Controls' group
-
         
         # The final reconstructed Sun
         self.sun_view = pg.ImageView()
@@ -651,121 +492,101 @@ class PySolexUI(QMainWindow):
 
 
 
+
+
     def select_ser_file(self):
-            file_path, _ = QFileDialog.getOpenFileName(self, "Open SER Scan", "", "SER Files (*.ser)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open SER Scan", "", "SER Files (*.ser)")
+        if file_path:
+            self.current_ser_path = file_path
+            self.reconstructor = SHGReconstructor(file_path)
             
-            if file_path:
-                # 1. CLEAN UP: Release previous file handles and clear memory
-                if hasattr(self, 'reconstructor'):
-                    del self.reconstructor
-                    import gc
-                    gc.collect() 
-
-                try:
-                    self.current_ser_path = file_path
-                    self.status_bar.showMessage("Loading and analyzing spectral lines...")
-                    QApplication.processEvents() # Keep UI snappy
-                    
-                    # 2. INITIALIZE: Create new reconstructor 
-                    # Handles 16-bit detection and 3840px geometry overrides
-                    self.reconstructor = SHGReconstructor(file_path)
-                    
-                    # 3. AUTO-ANALYZE: Replicates the professional log's "Computing average image"
-                    # This automatically finds the 'frown' or 'smile' (coeff_b and coeff_c)
-                    avg_frame = self.reconstructor.analyze_dataset(sample_rate=50)
-
-                    # 4. DEBUG: Console inspection of raw header bytes
-                    self.reconstructor.print_ser_debug_info()
-
-                    # 5. UI SETUP: Sync sliders using corrected metadata
-                    actual_w = self.reconstructor.width
-                    actual_h = self.reconstructor.height
-                    actual_frames = self.reconstructor.frame_count
-                    
-                    # Update horizontal slider for X-position/Wavelength
-                    self.x_slider.setRange(0, actual_w)
-                    
-                    # Setup Spectrum View (Top Box)
-                    # We use the high-quality average frame instead of frame 0
-                    # This makes the spectral line much easier to see
-                    self.spectrum_view.getView().setAspectLocked(False)
-                    self.spectrum_view.getView().invertY(True) # Correct sensor orientation
-                    
-                    # .T is required for pyqtgraph display convention
-                    self.spectrum_view.setImage(avg_frame.T)
-                    self.spectrum_view.autoLevels() 
-                    
-                    # Setup Main View (Disk View)
-                    self.sun_view.getView().setAspectLocked(False)
-                    
-                    # Enable controls
-                    self.reconstruct_btn.setEnabled(True)
-                    self.btn_preview_raw.setEnabled(True) 
-                    
-                    # 6. STATUS UPDATE: Display curve detection results
-                    shape_type = "Frown (n)" if self.reconstructor.coeff_b < 0 else "Smile (u)"
-                    self.status_bar.showMessage(
-                        f"Loaded: {actual_w}x{actual_h} | Frames: {actual_frames} | Curve: {shape_type}"
-                    )
-
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    self.status_bar.showMessage(f"Error loading file: {e}")
-
-
-
-    def run_reconstruction(self, override_pixel=None):
-            """
-            Triggers the processing loop and displays the result.
-            Handles Angstrom-to-Pixel conversion and dynamic sensor sizes.
-            """
-            if not hasattr(self, 'reconstructor'):
-                print("Error: Reconstructor not initialized. Load a SER file first.")
-                return
-
-            # 1. Determine the tuning target (Pixel or Angstrom)
-            if override_pixel is not None:
-                # Use the exact pixel coordinate from Auto-Center (e.g., 39.0)
-                tuning_val = float(override_pixel)
-            else:
-                # Otherwise, read the value from the UI box
-                try:
-                    tuning_val = float(self.line_x_input.text())
-                except ValueError:
-                    tuning_val = 6562.81
-
-            # 2. Collect Processing Parameters
-            # Check if your UI elements exist before calling them
-            sharpen = self.sharpen_checkbox.isChecked() if hasattr(self, 'sharpen_checkbox') else False
+            from app.core.ser_reader import SERReader
+            reader = SERReader(file_path) # Should be updated to width 3056
             
-            # 3. Execute Vectorized Reconstruction
-            # This uses the high-speed cv2.remap logic
-            final_sun = self.reconstructor.process(
-                tuning_val, 
-                rotation_deg=0, 
-                sharpen=sharpen, 
-                callback=self.update_scan_preview
-            )
+            # Update X-Slider to the real sensor width
+            self.x_slider.setRange(0, 3056)
+            
+            # Update Aspect Ratio Slider based on log data (1.08)
+            # 1.08 * 100 = 108
+            #self.ratio_slider.setValue(108) 
 
-            # 4. Display the Result (Addressing the AttributeError)
-            if final_sun is not None:
-                # IMPORTANT: Change 'reconstructed_view' to the name you used in your UI setup.
-                # If you are unsure, check your __init__ or UI file for the pg.ImageView widget.
+            # Setup Spectrum View
+            first_frame = reader.get_frame(0)
+            self.spectrum_view.getView().setAspectLocked(False)
+            self.spectrum_view.setImage(first_frame.T)
+            self.spectrum_view.autoLevels() 
+            
+            self.sun_view.getView().setAspectLocked(False)
+            self.reconstruct_btn.setEnabled(True)
+            self.status_bar.showMessage(f"Loaded: 3056x128 | Frames: {reader.frame_count}")
+
+
+    def run_reconstruction(self):
+        try:
+            # 1. get the x-line position
+            #line_x = int(self.line_x_input.text())
+            raw_text = self.line_x_input.text().replace(',', '.') 
+            #target_wl = float(self.line_x_input.text().replace(',', '.'))
+            target_wl = float(raw_text)
+
+            #line_x = float(raw_text) # This allows 106.5 without crashing
+
+            # Convert that wavelength to the 105.x pixel coordinate
+            line_pixel = self.reconstructor.wavelength_to_pixel(target_wl)
+
+            # 2. run the processing (the "stacking" of 3,618 slits)
+            #raw_sun = self.reconstructor.process(line_x)
+            #raw_sun = self.reconstructor.process(line_pixel, rotation_deg=self.rotation_slider.value(), callback=self.update_scan_preview)
+
+# Save it to the CLASS (self) so other buttons can see it
+            self.current_recon_data = self.reconstructor.process(line_pixel, rotation_deg=self.rotation_slider.value(), callback=self.update_scan_preview)
+            self.sun_view.setImage(self.current_recon_data)
+
+
+
+
+            #rotation 
+            rotation_val = self.rotation_slider.value()
+            #rotation_deg = rotation_val
+
+            # 3. update the display
+            #self.sun_view.setImage(raw_sun)
+            
+            # Corrected: Access imageItem to set options
+            self.sun_view.imageItem.setOpts(axisOrder='row-major') 
+            
+            # This 'linear' interpolation will help smooth out the 
+            # "diagonal mesh" patterns you are seeing in the 83px height.
+            self.sun_view.imageItem.setOpts(interpolation='linear')
+            
+            # To standardize brightness without crashing:
+            self.sun_view.setLevels(0, 255)
+
+
+            # 4. fix the fixed values: pull the current live aspect ratio
+            view_box = self.sun_view.getView()
+            view_box.setAspectLocked(False) # critical: allows stretching
+            
+            try:
+                # use whatever your text box is named (speed_input or aspect_input)
+                #stretch_val = float(self.speed_input.text())
+                stretch_val = self.ratio_slider.value() / 100.0
+                #current_aspect = float(self.speed_input.text())
+                current_aspect = stretch_val
+                # apply the stretch to the 83-pixel height
+                # this turns the "barcode" into a circle based on your slider
+                view_box.setYRange(0, 3056 * stretch_val, padding=0)
                 
-                # Example: If your widget is actually called 'recon_image_view':
-                # self.recon_image_view.setImage(final_sun.T, autoLevels=True)
-                
-                # Temporary safety check to prevent crashing:
-                try:
-                    # Transpose for pyqtgraph's [x, y] coordinate system
-                    self.sun_view.setImage(final_sun.T, autoLevels=True)
-                except AttributeError:
-                    print("CRITICAL: You need to rename 'self.reconstructed_view' to your actual widget name.")
-                
-                # Update status bar
-                unit = "px" if tuning_val < 2000 else "Å"
-                self.status_bar.showMessage(f"Reconstruction Complete | Target: {tuning_val:.2f}{unit}")
+            except ValueError:
+                # fallback if the text box is empty or invalid
+                view_box.setYRange(0, 3056 * 43.6, padding=0)
+
+            #self.status_bar.showMessage(f"reconstructed at x: {line_x}")
+            self.status_bar.showMessage(f"Target: {target_wl}Å (Pixel: {line_pixel:.2f})")
+
+        except Exception as e:
+            print(f"detailed error: {e}")
+
 
 
 
