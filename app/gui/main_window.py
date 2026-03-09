@@ -61,6 +61,8 @@ class PySolexUI(QMainWindow):
 
         self.sun_view.getView().scene().sigMouseClicked.connect(self.on_sun_clicked)
 
+        pg.setConfigOption('imageAxisOrder', 'row-major')
+
 
 
 
@@ -103,45 +105,63 @@ class PySolexUI(QMainWindow):
 
 
 
+
+
+
+
     def update_scan_preview(self, frame, frame_idx):
-            import pyqtgraph as pg # Ensure pg is available
-            
-            # 1. Prepare data
-            data = frame.T.astype(np.float32)
-            avg_brightness = np.mean(data)
-            
-            # 2. Add or Update the Red Tuning Line
-            if not hasattr(self, 'tuning_line'):
-                # Create a red horizontal line that we can move
-                self.tuning_line = pg.InfiniteLine(angle=0, pen={'color': 'r', 'width': 2})
-                self.spectrum_view.addItem(self.tuning_line)
-            
-            # Sync the line position with your current text input
-            try:
-                current_y = float(self.line_x_input.text())
-                self.tuning_line.setValue(current_y)
-            except ValueError:
-                pass
+        """
+        Updates the live spectrum view. Works for any sensor geometry.
+        """
+        import pyqtgraph as pg
+        from PySide6.QtWidgets import QApplication
+        import numpy as np
 
-            # 3. Logic to "Lock" the display levels (Your existing code)
-            if not hasattr(self, 'levels_locked') or frame_idx == 0:
-                self.spectrum_view.setImage(data, autoLevels=True)
-                self.spectrum_view.getView().setAspectLocked(False)
-                self.spectrum_view.autoRange()
-                
-                if avg_brightness > 10: 
-                    self.current_levels = self.spectrum_view.getHistogramWidget().getLevels()
-                    self.levels_locked = True 
-            else:
-                self.spectrum_view.setImage(data, autoLevels=False, levels=self.current_levels)
+        # 1. DYNAMIC RESHAPE
+        # Use the verified dimensions to ensure the preview isn't scrambled
+        w = self.reconstructor.width
+        h = self.reconstructor.height
+        
+        try:
+            # Reshape to (Spatial, Spectral) then transpose for PyQtGraph (Spectral, Spatial)
+            display_data = frame.reshape((h, w)).astype(np.float32).T
+        except:
+            # Fallback if frame size is unexpected
+            return
 
-            # 4. Standard UI updates
-            self.status_bar.showMessage(f"Scanning: Frame {frame_idx} (Brightness: {avg_brightness:.1f})")
-            if hasattr(self, 'progress_bar'):
-                self.progress_bar.setValue(frame_idx)
-                
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
+        # 2. TUNING LINE MANAGEMENT
+        if not hasattr(self, 'tuning_line'):
+            self.tuning_line = pg.InfiniteLine(angle=90, pen={'color': 'r', 'width': 2})
+            self.spectrum_view.addItem(self.tuning_line)
+        
+        # Update line position based on UI text
+        try:
+            val_text = self.line_x_input.text()
+            if val_text:
+                val = float(val_text)
+                # If user entered Angstroms (e.g. 6562.8), convert to Pixel
+                if val > 2000:
+                    pos = (w / 2) + (val - 6562.81) / 0.033
+                else:
+                    pos = val
+                self.tuning_line.setValue(pos)
+        except:
+            pass
+
+        # 3. DISPLAY & CONTRAST
+        if not hasattr(self, 'levels_locked') or frame_idx == 0:
+            self.spectrum_view.setImage(display_data, autoLevels=True)
+            hist = self.spectrum_view.getHistogramWidget()
+            if hist:
+                self.current_levels = hist.getLevels()
+                self.levels_locked = True
+        else:
+            levels = getattr(self, 'current_levels', [0, 255])
+            self.spectrum_view.setImage(display_data, autoLevels=False, levels=levels)
+
+        # 4. STATUS
+        self.status_bar.showMessage(f"Processing: Frame {frame_idx}/{self.reconstructor.frame_count}")
+        QApplication.processEvents()
 
 
 
@@ -196,67 +216,47 @@ class PySolexUI(QMainWindow):
 
 
     def auto_tune_wavelength(self):
-        """Finds the core and updates UI without breaking math units."""
-        if not hasattr(self, 'reconstructor') or not hasattr(self.reconstructor, 'avg_frame'):
+        """
+        Automatically finds the absorption line and updates the UI.
+        """
+        if not hasattr(self, 'reconstructor') or self.reconstructor.avg_frame is None: 
             return
-
-        # 1. Find pixel core (e.g. 39.0)
-        best_pixel_y = self.reconstructor.find_absorption_core(self.reconstructor.avg_frame)
         
-        # 2. Sync the Red Line (Fixes the AttributeError)
-        # We search for any InfiniteLine attached to the spectrum view
+        # Use the reconstructor's already calculated reference_x
+        # which is more accurate than a simple mean (it uses the polynomial center).
+        best_pixel_x = self.reconstructor.reference_x
+        
+        # Update UI components
         if hasattr(self, 'tuning_line'):
-            self.tuning_line.setValue(best_pixel_y)
-        elif hasattr(self, 'v_line'): # Check common alternative name
-            self.v_line.setValue(best_pixel_y)
-
-        # 3. Convert to Angstrom for UI display
-        # Uses the short axis (e.g. 128) to find the center
-        sensor_h = self.reconstructor.height if not self.reconstructor.needs_transpose else self.reconstructor.width
-        center_y = sensor_h / 2
-        display_angstrom = 6562.81 + (best_pixel_y - center_y) * 0.033
-        self.line_x_input.setText(f"{display_angstrom:.2f}")
+            self.tuning_line.setValue(best_pixel_x)
         
-        # 4. Run reconstruction using the pixel directly
-        self.run_reconstruction(override_pixel=best_pixel_y)
+        self.line_x_input.setText(f"{best_pixel_x:.2f}")
+        
+        # Trigger reconstruction with the newly found value
+        # Note: We pass the pixel value directly to your run_reconstruction method
+        self.run_reconstruction()
+
+
+
+
+
 
     def run_reconstruction(self, override_pixel=None):
-        """Triggers processing and displays in sun_view."""
-        if not hasattr(self, 'reconstructor'):
-            return
+        if not hasattr(self, 'reconstructor'): return
 
-        # --- WHERE IS THE XY RATIO? ---
-        # It is pulled from your UI input box (self.xy_ratio_input)
-        try:
-            current_ratio = float(self.xy_ratio_input.text())
-            self.reconstructor.xy_ratio = current_ratio
-        except (ValueError, AttributeError):
-            # Fallback for vertical data (3056x128)
-            self.reconstructor.xy_ratio = 0.04 
-
-        # Determine Target
-        if override_pixel is not None:
-            tuning_val = float(override_pixel)
+        # Grab multiplier from slider (default to 0.04 for vertical data)
+        if hasattr(self, 'ratio_slider'):
+            self.reconstructor.xy_multiplier = self.ratio_slider.value() / 2500.0
         else:
-            try:
-                tuning_val = float(self.line_x_input.text())
-            except ValueError:
-                tuning_val = 6562.81
+            self.reconstructor.xy_multiplier = 0.04
 
-        # Process
-        final_sun = self.reconstructor.process(
-            tuning_val, 
-            sharpen=self.sharpen_checkbox.isChecked(),
-            callback=self.update_scan_preview
-        )
+        val = override_pixel if override_pixel else float(self.line_x_input.text())
 
-        # Display Result
+        final_sun = self.reconstructor.process(val)
+
         if final_sun is not None:
-            # We know this exists from your __init__
+            # We transpose the FINAL image just for the display widget
             self.sun_view.setImage(final_sun.T, autoLevels=True)
-            unit = "px" if tuning_val < 2000 else "Å"
-            self.status_bar.showMessage(f"Reconstruction Done | Target: {tuning_val:.2f}{unit}")
-
 
 
 
@@ -689,10 +689,9 @@ class PySolexUI(QMainWindow):
                     # We use the high-quality average frame instead of frame 0
                     # This makes the spectral line much easier to see
                     self.spectrum_view.getView().setAspectLocked(False)
-                    self.spectrum_view.getView().invertY(True) # Correct sensor orientation
-                    
+                    self.spectrum_view.getView().invertY(False) # Correct sensor orientation
                     # .T is required for pyqtgraph display convention
-                    self.spectrum_view.setImage(avg_frame.T)
+                    self.spectrum_view.setImage(avg_frame.T, autoLevels=True)
                     self.spectrum_view.autoLevels() 
                     
                     # Setup Main View (Disk View)
@@ -716,57 +715,49 @@ class PySolexUI(QMainWindow):
 
 
     def run_reconstruction(self, override_pixel=None):
-            """
-            Triggers the processing loop and displays the result.
-            Handles Angstrom-to-Pixel conversion and dynamic sensor sizes.
-            """
-            if not hasattr(self, 'reconstructor'):
-                print("Error: Reconstructor not initialized. Load a SER file first.")
-                return
+        """Triggers processing, handles UI variables, and displays the result."""
+        if not hasattr(self, 'reconstructor'):
+            self.status_bar.showMessage("Error: Load a SER file first.")
+            return
 
-            # 1. Determine the tuning target (Pixel or Angstrom)
-            if override_pixel is not None:
-                # Use the exact pixel coordinate from Auto-Center (e.g., 39.0)
-                tuning_val = float(override_pixel)
-            else:
-                # Otherwise, read the value from the UI box
-                try:
-                    tuning_val = float(self.line_x_input.text())
-                except ValueError:
-                    tuning_val = 6562.81
+        # 1. Link the Aspect Ratio Slider to the Math
+        # Your slider goes 50 to 200 (Default 108). We convert this to a 0.5x - 2.0x multiplier.
+        if hasattr(self, 'ratio_slider'):
+            self.reconstructor.xy_multiplier = self.ratio_slider.value() / 100.0
+        else:
+            self.reconstructor.xy_multiplier = 1.0
 
-            # 2. Collect Processing Parameters
-            # Check if your UI elements exist before calling them
-            sharpen = self.sharpen_checkbox.isChecked() if hasattr(self, 'sharpen_checkbox') else False
+        # 2. Determine Tuning Target
+        if override_pixel is not None:
+            tuning_val = float(override_pixel)
+        else:
+            try:
+                tuning_val = float(self.line_x_input.text())
+            except ValueError:
+                tuning_val = 6562.81
+
+        # 3. Collect Processing Parameters
+        sharpen = self.sharpen_check.isChecked() if hasattr(self, 'sharpen_check') else False
+        rotation = self.rotation_slider.value() if hasattr(self, 'rotation_slider') else 0
+        
+        # 4. Execute Reconstruction
+        final_sun = self.reconstructor.process(
+            tuning_val, 
+            rotation_deg=rotation, 
+            sharpen=sharpen, 
+            callback=self.update_scan_preview
+        )
+
+        # 5. Display the Result
+        if final_sun is not None:
+            # Save it so your save_processed_image method works
+            self.current_recon_data = final_sun 
             
-            # 3. Execute Vectorized Reconstruction
-            # This uses the high-speed cv2.remap logic
-            final_sun = self.reconstructor.process(
-                tuning_val, 
-                rotation_deg=0, 
-                sharpen=sharpen, 
-                callback=self.update_scan_preview
-            )
-
-            # 4. Display the Result (Addressing the AttributeError)
-            if final_sun is not None:
-                # IMPORTANT: Change 'reconstructed_view' to the name you used in your UI setup.
-                # If you are unsure, check your __init__ or UI file for the pg.ImageView widget.
+            if hasattr(self, 'sun_view'):
+                self.sun_view.setImage(final_sun.T, autoLevels=True)
                 
-                # Example: If your widget is actually called 'recon_image_view':
-                # self.recon_image_view.setImage(final_sun.T, autoLevels=True)
-                
-                # Temporary safety check to prevent crashing:
-                try:
-                    # Transpose for pyqtgraph's [x, y] coordinate system
-                    self.sun_view.setImage(final_sun.T, autoLevels=True)
-                except AttributeError:
-                    print("CRITICAL: You need to rename 'self.reconstructed_view' to your actual widget name.")
-                
-                # Update status bar
-                unit = "px" if tuning_val < 2000 else "Å"
-                self.status_bar.showMessage(f"Reconstruction Complete | Target: {tuning_val:.2f}{unit}")
-
+            unit = "px" if tuning_val < 2000 else "Å"
+            self.status_bar.showMessage(f"Done | Target: {tuning_val:.2f}{unit} | Scale: {self.reconstructor.xy_multiplier}x")
 
 
 
