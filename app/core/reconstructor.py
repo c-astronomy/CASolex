@@ -184,8 +184,6 @@ class SHGReconstructor:
 
 
 
-
-
     def process(self, tuning_val, rotation_deg=0, sharpen=False, callback=None):
         """
         Builds the solar image by meshing vertical slit columns.
@@ -196,8 +194,8 @@ class SHGReconstructor:
             self.analyze_dataset()
 
         # IMPORTANT: Use the dimensions validated by the Reader
-        w = self.reader.width   # Spectral (Short) axis
-        h = self.reader.height  # Spatial (Long) axis
+        w = self.reader.width   # Spectral (Short) axis: 128 or 200
+        h = self.reader.height  # Spatial (Long) axis: 3056 or 3840
         f = self.reader.frame_count
 
         print(f"\n--- DEBUG: RECONSTRUCTION START ---")
@@ -210,70 +208,66 @@ class SHGReconstructor:
         else:
             target_x = tuning_val
             
-        # SAFETY FIX: Prevent out-of-bounds sampling (e.g., the 128.00 bug)
-        # Pixel indices must be between 0 and (width - 1)
+        # SAFETY FIX: Prevent out-of-bounds sampling
         target_x = max(0.0, min(float(target_x), float(w - 1.0)))
             
         print(f"Target Spectral X: {target_x:.2f}")
 
         # 3. ASPECT RATIO (Round Sun Fix)
-        # Use 0.75 for tall slit (LUCAM) and 1.0 for wide slit (ZWO)
         ratio = getattr(self, 'xy_ratio', 0.75 if h > 1000 else 1.0)
         target_w = int(f * ratio)
 
         # 4. VERTICAL SAMPLING MAP (The Mesh Logic)
         y_axis = np.arange(h).astype(np.float32)
-        # Calculate where the spectral line center is for every Y pixel
         curve_x = np.polyval(self.poly_coeffs, y_axis)
         shift = target_x - self.reference_x
         
-        # map_x: Maps the curved absorption line to a straight vertical line
+        # Build the map for a SINGLE vertical column
         map_x = (curve_x + shift).astype(np.float32).reshape(-1, 1)
-        # map_y: Keeps the spatial position linear
         map_y = y_axis.reshape(-1, 1)
         
         # 5. INITIALIZE CANVAS
-        # Height is 'h' (3056/3840), Width is frame count 'f'
+        # (Height, Width) format
         recon = np.zeros((h, f), dtype=np.float32)
 
         # 6. EXTRACTION LOOP
         for i in range(f):
             raw = self.reader.get_frame(i)
             
-            # Reshape into Slit x Spectrum: (h, w)
-            # This aligns with the (3056, 128) data layout
-            frame = raw.reshape((h, w)).astype(np.float32)
+            # CRITICAL FIX: Explicitly ensure the frame is (Height, Width)
+            # Converting to float32 here prevents rounding errors in remap
+            try:
+                frame = raw.astype(np.float32).reshape((h, w))
+            except ValueError:
+                # Skip corrupted frames that don't match expected buffer size
+                continue
             
-            # Extract the corrected vertical column
+            # THE TILING FIX: Use BORDER_CONSTANT to kill 'stacked suns'
+            # This ensures pixels outside the w x h box are black, not wrapped.
             line_slice = cv2.remap(frame, map_x, map_y, 
                                   interpolation=cv2.INTER_LINEAR,
                                   borderMode=cv2.BORDER_CONSTANT,
                                   borderValue=0)
             
-            # Insert the slice as a column in the final image
+            # Insert as a single vertical column in the reconstruction
             recon[:, i] = line_slice.flatten()
 
             if callback and i % 500 == 0:
                 callback(frame, i)
 
         # 7. NORMALIZE & RESIZE
-        # Convert 32-bit float data to 8-bit image
         recon_8 = cv2.normalize(recon, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         
-        # Resize adjusts the horizontal 'f' dimension to create a round disk
+        # Resize adjusts the horizontal dimension to create a round disk
         final_sun = cv2.resize(recon_8, (target_w, h), interpolation=cv2.INTER_CUBIC)
 
         # 8. POST-PROCESSING (Rotation & Sharpening)
         if rotation_deg != 0:
-            if rotation_deg == 90:
-                final_sun = cv2.rotate(final_sun, cv2.ROTATE_90_CLOCKWISE)
-            elif rotation_deg == 180:
-                final_sun = cv2.rotate(final_sun, cv2.ROTATE_180)
-            elif rotation_deg == 270:
-                final_sun = cv2.rotate(final_sun, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            modes = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+            if rotation_deg in modes:
+                final_sun = cv2.rotate(final_sun, modes[rotation_deg])
 
         if sharpen:
-            # Simple Unsharp Mask
             gaussian = cv2.GaussianBlur(final_sun, (0, 0), 2.0)
             final_sun = cv2.addWeighted(final_sun, 1.5, gaussian, -0.5, 0)
 
