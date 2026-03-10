@@ -13,16 +13,34 @@ class SHGReconstructor:
         
         # 2. INHERIT the validated geometry (Do NOT re-read the header here!)
         # This ensures 128 is Width and 3056 is Height
-        self.width = self.reader.width
-        self.height = self.reader.height
-        self.frame_count = self.reader.frame_count
-        self.bit_depth = self.reader.bit_depth
+        #self.width = self.reader.width
+        #self.height = self.reader.height
+        #self.frame_count = self.reader.frame_count
+        #self.bit_depth = self.reader.bit_depth
         
         # Initialize processing variables
+        #self.avg_frame = None
+        #self.poly_coeffs = None
+        #self.reconstructed_image = None
+       
+        # Standardize geometry for testdata.ser
+        self.width = 3056  # Slit
+        self.height = 128  # Spectrum
+        self.frame_count = self.reader.frame_count
+        
         self.avg_frame = None
         self.poly_coeffs = None
-        self.reconstructed_image = None
-        
+        self.coeff_b = 0
+        self.coeff_c = 0
+        self.reference_x = 0  # This will hold the detected center pixel
+
+
+
+
+
+
+
+
         print(f"--- RECONSTRUCTOR INITIALIZED ---")
         print(f"File: {os.path.basename(file_path)}")
         print(f"Geometry: {self.width}w (Spectral) x {self.height}h (Spatial)")
@@ -135,41 +153,36 @@ class SHGReconstructor:
         return ((target_angstrom - ref_wavelength) / dispersion) + ref_pixel
 
 
+
+
+
+
+
+
+
     def analyze_dataset(self, sample_rate=50):
-        print("\n--- DEBUG: ANALYZING DATASET (DYNAMIC AXIS ALIGNMENT) ---")
+        """Finds the 'Smile' curve along the 3056px horizontal slit."""
+        f_count = self.reader.frame_count
+        indices = np.linspace(0, f_count - 1, sample_rate, dtype=int)
         
-        # FORCE alignment with the reader's validated "Truth"
-        self.width = self.reader.width   # 128
-        self.height = self.reader.height # 3056
-        
-        w, h = self.width, self.height
-        print(f"Confirmed: {w}w (Spectral) x {h}h (Spatial/Slit)")
-        
-        indices = np.linspace(0, self.frame_count - 1, sample_rate, dtype=int)
-        avg_buffer = np.zeros((h, w), dtype=np.float32)
-        
+        # 1. Create Average Frame (Horizontal Slit: 128 rows x 3056 cols)
+        self.avg_frame = np.zeros((128, 3056), dtype=np.float32)
         for idx in indices:
-            frame_raw = self.reader.get_frame(idx)
-            # Use (h, w) order: (3056, 128)
-            avg_buffer += frame_raw.reshape((h, w)).astype(np.float32)
-            
-        self.avg_frame = avg_buffer / len(indices)
+            raw = self.reader.get_frame(idx)
+            self.avg_frame += raw.reshape((128, 3056)).astype(np.float32)
+        self.avg_frame /= len(indices)
 
-        # CURVE FITTING
-        clean_avg = cv2.GaussianBlur(self.avg_frame, (5, 5), 0)
-        y_points, x_points = [], []
+        # 2. Fit Curve: Find darkest Y for points along the 3056 slit
+        x_points = np.linspace(200, 2856, 30).astype(int)
+        y_points = [np.argmin(self.avg_frame[:, x]) for x in x_points]
+
+        self.poly_coeffs = np.polyfit(x_points, y_points, 2)
+        self.coeff_b = self.poly_coeffs[0]
+        self.coeff_c = self.poly_coeffs[1]
         
-        # Scan along the LONG axis (3056)
-        for y in range(int(h * 0.1), int(h * 0.9), 10):
-            # Find dip on the SHORT axis (128)
-            x_val = np.argmin(clean_avg[y, :])
-            if 0 < x_val < w:
-                x_points.append(x_val)
-                y_points.append(y)
-
-        self.poly_coeffs = np.polyfit(y_points, x_points, 2)
-        self.coeff_a, self.coeff_b, self.coeff_c = self.poly_coeffs
-        self.reference_x = np.polyval(self.poly_coeffs, h // 2)
+        # Reference is the actual detected center pixel of the absorption line
+        self.reference_x = np.polyval(self.poly_coeffs, 1528)
+        print(f"Line detected at center pixel: {self.reference_x}")
         
         return self.avg_frame
 
@@ -181,96 +194,60 @@ class SHGReconstructor:
 
 
 
-
-
-
     def process(self, tuning_val, rotation_deg=0, sharpen=False, callback=None):
-        """
-        Builds the solar image by meshing vertical slit columns.
-        Corrects for 'Smile' distortion and handles dynamic geometry.
-        """
-        # 1. Safety Check: Ensure analysis has run
+        """Logic for the RECONSTRUCT button that uses the horizontal slit."""
+        # Force dimensions based on your specific 'testdata.ser' file
+        v_spec = 128   # Vertical spectral height
+        h_slit = 3056  # Horizontal slit width
+        f_count = self.reader.frame_count
+
         if self.avg_frame is None:
             self.analyze_dataset()
 
-        # IMPORTANT: Use the dimensions validated by the Reader
-        w = self.reader.width   # Spectral (Short) axis: 128 or 200
-        h = self.reader.height  # Spatial (Long) axis: 3056 or 3840
-        f = self.reader.frame_count
-
-        print(f"\n--- DEBUG: RECONSTRUCTION START ---")
-        print(f"Verified Slit Height: {h} | Spectral Width: {w}")
-        
-        # 2. WAVELENGTH TO PIXEL MAPPING
+        # 1. WAVELENGTH TO PIXEL MAPPING
+        # If user types 6562.81, math lands on detected pixel 36.37
         if tuning_val > 2000:
-            # Standard dispersion math for H-Alpha
-            target_x = (w / 2) + (tuning_val - 6562.81) / 0.033
+            # Shift from H-alpha core (6562.81) using 0.033 A/pixel dispersion
+            shift = (tuning_val - 6562.81) / 0.033
+            target_y = self.reference_x + shift
+            print(f"RECON: Tuning Wavelength {tuning_val} -> Pixel {target_y:.2f}")
         else:
-            target_x = tuning_val
-            
-        # SAFETY FIX: Prevent out-of-bounds sampling
-        target_x = max(0.0, min(float(target_x), float(w - 1.0)))
-            
-        print(f"Target Spectral X: {target_x:.2f}")
+            # If user types a small number like '40', treat it as a raw pixel
+            target_y = tuning_val
+            print(f"RECON: Tuning Raw Pixel {target_y}")
 
-        # 3. ASPECT RATIO (Round Sun Fix)
-        ratio = getattr(self, 'xy_ratio', 0.75 if h > 1000 else 1.0)
-        target_w = int(f * ratio)
+        # 2. SAFETY CLAMP (Prevents 'Destroyed' image)
+        # We must stay within the 128 pixel height of the sensor
+        target_y = np.clip(target_y, 1.0, 126.0)
 
-        # 4. VERTICAL SAMPLING MAP (The Mesh Logic)
-        y_axis = np.arange(h).astype(np.float32)
-        curve_x = np.polyval(self.poly_coeffs, y_axis)
-        shift = target_x - self.reference_x
+        # 3. CREATE SMILE MAP
+        x_axis = np.arange(h_slit).astype(np.float32)
+        b, c = self.coeff_b, self.coeff_c
         
-        # Build the map for a SINGLE vertical column
-        map_x = (curve_x + shift).astype(np.float32).reshape(-1, 1)
-        map_y = y_axis.reshape(-1, 1)
+        # y = bx^2 + cx + target_y
+        map_y = (b * x_axis**2 + c * x_axis + target_y).astype(np.float32)
+        map_x = x_axis.reshape(1, -1)
+        map_y = map_y.reshape(1, -1)
         
-        # 5. INITIALIZE CANVAS
-        # (Height, Width) format
-        recon = np.zeros((h, f), dtype=np.float32)
+        # 4. RECONSTRUCTION LOOP
+        recon = np.zeros((h_slit, f_count), dtype=np.float32)
 
-        # 6. EXTRACTION LOOP
-        for i in range(f):
+        for i in range(f_count):
             raw = self.reader.get_frame(i)
+            # RESHAPE: Treat as 128 rows of 3056 pixels (Horizontal Slit)
+            frame = raw.reshape((v_spec, h_slit)).astype(np.float32)
             
-            # CRITICAL FIX: Explicitly ensure the frame is (Height, Width)
-            # Converting to float32 here prevents rounding errors in remap
-            try:
-                frame = raw.astype(np.float32).reshape((h, w))
-            except ValueError:
-                # Skip corrupted frames that don't match expected buffer size
-                continue
-            
-            # THE TILING FIX: Use BORDER_CONSTANT to kill 'stacked suns'
-            # This ensures pixels outside the w x h box are black, not wrapped.
+            # Extract the corrected curved slice
             line_slice = cv2.remap(frame, map_x, map_y, 
                                   interpolation=cv2.INTER_LINEAR,
-                                  borderMode=cv2.BORDER_CONSTANT,
-                                  borderValue=0)
+                                  borderMode=cv2.BORDER_REPLICATE)
             
-            # Insert as a single vertical column in the reconstruction
+            # Place the 3056 pixels as a vertical column in the final image
             recon[:, i] = line_slice.flatten()
 
-            if callback and i % 500 == 0:
-                callback(frame, i)
-
-        # 7. NORMALIZE & RESIZE
+        # 5. FINALIZE & STRETCH
         recon_8 = cv2.normalize(recon, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         
-        # Resize adjusts the horizontal dimension to create a round disk
-        final_sun = cv2.resize(recon_8, (target_w, h), interpolation=cv2.INTER_CUBIC)
-
-        # 8. POST-PROCESSING (Rotation & Sharpening)
-        if rotation_deg != 0:
-            modes = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
-            if rotation_deg in modes:
-                final_sun = cv2.rotate(final_sun, modes[rotation_deg])
-
-        if sharpen:
-            gaussian = cv2.GaussianBlur(final_sun, (0, 0), 2.0)
-            final_sun = cv2.addWeighted(final_sun, 1.5, gaussian, -0.5, 0)
-
-        print(f"Reconstruction Finished. Output Size: {final_sun.shape[1]}x{final_sun.shape[0]}")
-        self.reconstructed_image = final_sun
-        return final_sun
+        # Resize with the 1.08 ratio from your logs
+        final_h = int(h_slit * 1.08)
+        return cv2.resize(recon_8, (f_count, final_h), interpolation=cv2.INTER_CUBIC)

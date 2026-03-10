@@ -71,12 +71,14 @@ class PySolexUI(QMainWindow):
             try:
                 self.status_bar.showMessage("Starting Composite: Step 1/2 (Photosphere)...")
                 # Step 1: Reconstruct the Photosphere (6560.0)
-                pixel_6562 = self.reconstructor.wavelength_to_pixel(6562.81)
+                #pixel_6562 = self.reconstructor.wavelength_to_pixel(6562.81)
+                pixel_6562 = self.reconstructor.wavelength_to_pixel(6565.09)
                 photo_data = self.reconstructor.process(pixel_6562, rotation_deg=self.rotation_slider.value())
 
                 self.status_bar.showMessage("Starting Composite: Step 2/2 (Chromosphere)...")
                 # Step 2: Reconstruct the Chromosphere (6563.0)
-                pixel_6563 = self.reconstructor.wavelength_to_pixel(6563.0)
+                #pixel_6563 = self.reconstructor.wavelength_to_pixel(6563.0)
+                pixel_6563 = self.reconstructor.wavelength_to_pixel(6565)
                 chromo_data = self.reconstructor.process(pixel_6563, rotation_deg=self.rotation_slider.value())
 
                 # Step 3: Blend them (50/50 mix)
@@ -239,24 +241,52 @@ class PySolexUI(QMainWindow):
 
 
 
+    def run_reconstruction(self):
+        """This is the code that runs when you click the RECONSTRUCT button."""
+        if not hasattr(self, 'reconstructor'):
+            return
+
+        try:
+            # 1. GRAB THE TEXT: We must get exactly what is in the box right now
+            # Usually this is named self.line_x_input
+            input_text = self.line_x_input.text().strip()
+            
+            # 2. CONVERT: If it's empty, we default to H-alpha (6562.81)
+            # If there is a number, we use it.
+            if not input_text:
+                tuning_val = 6562.81
+            else:
+                tuning_val = float(input_text)
+
+            # 3. CONSOLE CHECK: This will confirm the UI is actually sending the number
+            print(f"UI -> Reconstructor: Sending value {tuning_val}")
+
+            # 4. PROCESS: Call the logic with the new value
+            final_sun = self.reconstructor.process(tuning_val)
+
+            # 5. DISPLAY: Show it on the screen
+            if final_sun is not None:
+                self.sun_view.setImage(final_sun, autoLevels=True)
+                self.status_bar.showMessage(f"Reconstructed @ {tuning_val}")
+
+        except ValueError:
+            self.status_bar.showMessage("Error: Please enter a valid number in the box.")
+        except Exception as e:
+            print(f"CRITICAL UI ERROR: {e}")
 
 
-    def run_reconstruction(self, override_pixel=None):
-        if not hasattr(self, 'reconstructor'): return
 
-        # Grab multiplier from slider (default to 0.04 for vertical data)
-        if hasattr(self, 'ratio_slider'):
-            self.reconstructor.xy_multiplier = self.ratio_slider.value() / 2500.0
-        else:
-            self.reconstructor.xy_multiplier = 0.04
 
-        val = override_pixel if override_pixel else float(self.line_x_input.text())
 
-        final_sun = self.reconstructor.process(val)
+    def on_ha_core_clicked(self):
+        """Sets the box to 6562.81 and triggers reconstruction."""
+        self.line_x_input.setText("6562.81")
+        self.run_reconstruction()
 
-        if final_sun is not None:
-            # We transpose the FINAL image just for the display widget
-            self.sun_view.setImage(final_sun.T, autoLevels=True)
+    def on_sun_clicked(self):
+        """Sets the box to 6564 and triggers reconstruction."""
+        self.line_x_input.setText("6564.0")
+        self.run_reconstruction()
 
 
 
@@ -265,42 +295,42 @@ class PySolexUI(QMainWindow):
 
 
 
-    def on_sun_clicked(self, event):
-            if event.button() == Qt.LeftButton:
-                view_box = self.sun_view.getView()
-                pos = event.scenePos()
-                
-                if view_box.sceneBoundingRect().contains(pos):
-                    mouse_point = view_box.mapSceneToView(pos)
-                    
-                    # Frame index corresponds to X coordinate on the reconstruction
-                    frame_idx = int(mouse_point.x())
-                    frame_idx = max(0, min(frame_idx, self.reconstructor.reader.frame_count - 1))
-                    
-                    try:
-                        # 1. Pull the raw frame using our updated SERReader
-                        raw_data = self.reconstructor.reader.get_frame(frame_idx)
-                        
-                        # 2. Use the CORRECTED width/height from the reader
-                        h = self.reconstructor.reader.height
-                        w = self.reconstructor.reader.width
-                        
-                        # 3. Reshape the flat data into the 2D view
-                        # Note: get_frame now returns the correct dtype/endianness
-                        frame = raw_data.reshape((h, w))
-                        
-                        # 4. Update the Top View
-                        # Transpose (.T) is required for pyqtgraph orientation
-                        self.spectrum_view.setImage(frame.T)
-                        
-                        # 5. FORCE AUTO-LEVELS: This fixes the "Grey Box"
-                        self.spectrum_view.autoLevels()
-                        
-                        self.status_bar.showMessage(f"Raw Frame #{frame_idx} | Format: {w}x{h}")
-                        
-                    except Exception as e:
-                        print(f"Preview error: {e}")
-
+#    def on_sun_clicked(self, event):
+#            if event.button() == Qt.LeftButton:
+#                view_box = self.sun_view.getView()
+#                pos = event.scenePos()
+#                
+#                if view_box.sceneBoundingRect().contains(pos):
+#                    mouse_point = view_box.mapSceneToView(pos)
+#                    
+#                    # Frame index corresponds to X coordinate on the reconstruction
+#                    frame_idx = int(mouse_point.x())
+#                    frame_idx = max(0, min(frame_idx, self.reconstructor.reader.frame_count - 1))
+#                    
+#                    try:
+#                        # 1. Pull the raw frame using our updated SERReader
+#                        raw_data = self.reconstructor.reader.get_frame(frame_idx)
+#                        
+#                        # 2. Use the CORRECTED width/height from the reader
+#                        h = self.reconstructor.reader.height
+#                        w = self.reconstructor.reader.width
+#                        
+#                        # 3. Reshape the flat data into the 2D view
+#                        # Note: get_frame now returns the correct dtype/endianness
+#                        frame = raw_data.reshape((h, w))
+#                        
+#                        # 4. Update the Top View
+#                        # Transpose (.T) is required for pyqtgraph orientation
+#                        self.spectrum_view.setImage(frame.T)
+#                        
+#                        # 5. FORCE AUTO-LEVELS: This fixes the "Grey Box"
+#                        self.spectrum_view.autoLevels()
+#                        
+#                        self.status_bar.showMessage(f"Raw Frame #{frame_idx} | Format: {w}x{h}")
+###                        
+#                    except Exception as e:
+#                        print(f"Preview error: {e}")
+#
 
 
 
@@ -501,7 +531,8 @@ class PySolexUI(QMainWindow):
 
         # Input and Fine-Tune Row
         tune_layout = QHBoxLayout()
-        self.line_x_input = QLineEdit("6562.81")  # Default to Core  Chromosphere
+        #self.line_x_input = QLineEdit("6562.81")  # Default to Core  Chromosphere
+        self.line_x_input = QLineEdit("6565")  # Default to Core  Chromosphere
         #self.btn_minus = QPushButton("-0.01")
         #self.btn_plus = QPushButton("+0.01")
         #self.line_x_input_two = QLineEdit("6563")  # Default to Surface  Prothosphere
@@ -542,9 +573,11 @@ class PySolexUI(QMainWindow):
         #self.btn_minus.clicked.connect(lambda: self.adjust_wavelength(-0.01))
         #self.btn_plus.clicked.connect(lambda: self.adjust_wavelength(0.01))
         #self.btn_blue_wing.clicked.connect(lambda: self.set_preset(6562.3))
-        self.btn_core.clicked.connect(lambda: self.set_preset(6562.81))
+        #self.btn_core.clicked.connect(lambda: self.set_preset(6562.81))
+        self.btn_core.clicked.connect(lambda: self.set_preset(6565))
         #self.btn_red_wing.clicked.connect(lambda: self.set_preset(6563.3))
-        self.btn_protosphere.clicked.connect(lambda: self.set_preset(6563))
+        self.btn_protosphere.clicked.connect(lambda: self.set_preset(6565.09))
+        #self.btn_protosphere.clicked.connect(lambda: self.set_preset(6563))
         self.btn_sunspot.clicked.connect(lambda: self.set_preset(6564))
 
 
@@ -598,7 +631,8 @@ class PySolexUI(QMainWindow):
 
 
         #COMPOSIT TEST
-        self.btn_composite = QPushButton("Create Composite (6562.81 + 6563)")
+        #self.btn_composite = QPushButton("Create Composite (6562.81 + 6563)")
+        self.btn_composite = QPushButton("Create Composite (6565 + 6565.09)")
         self.btn_composite.setStyleSheet("background-color: #4B0082; color: white; font-weight: bold;")
         self.btn_composite.clicked.connect(self.run_composite_reconstruction)
         proc_layout.addRow(self.btn_composite) 
@@ -650,67 +684,71 @@ class PySolexUI(QMainWindow):
 
 
 
-
     def select_ser_file(self):
-            file_path, _ = QFileDialog.getOpenFileName(self, "Open SER Scan", "", "SER Files (*.ser)")
-            
-            if file_path:
-                # 1. CLEAN UP: Release previous file handles and clear memory
-                if hasattr(self, 'reconstructor'):
-                    del self.reconstructor
-                    import gc
-                    gc.collect() 
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open SER Scan", "", "SER Files (*.ser)")
+        
+        if file_path:
+            # 1. CLEAN UP: Release previous file handles and clear memory
+            if hasattr(self, 'reconstructor'):
+                del self.reconstructor
+                import gc
+                gc.collect() 
 
-                try:
-                    self.current_ser_path = file_path
-                    self.status_bar.showMessage("Loading and analyzing spectral lines...")
-                    QApplication.processEvents() # Keep UI snappy
-                    
-                    # 2. INITIALIZE: Create new reconstructor 
-                    # Handles 16-bit detection and 3840px geometry overrides
-                    self.reconstructor = SHGReconstructor(file_path)
-                    
-                    # 3. AUTO-ANALYZE: Replicates the professional log's "Computing average image"
-                    # This automatically finds the 'frown' or 'smile' (coeff_b and coeff_c)
-                    avg_frame = self.reconstructor.analyze_dataset(sample_rate=50)
+            try:
+                self.current_ser_path = file_path
+                self.status_bar.showMessage("Loading and analyzing spectral lines...")
+                QApplication.processEvents() # Keep UI snappy
+                
+                # 2. INITIALIZE: Create new reconstructor 
+                self.reconstructor = SHGReconstructor(file_path)
+                
+                # 3. AUTO-ANALYZE: Automatically finds the smile (sets coeff_b and coeff_c)
+                avg_frame = self.reconstructor.analyze_dataset(sample_rate=50)
 
-                    # 4. DEBUG: Console inspection of raw header bytes
+                # 4. DEBUG: Console inspection (if method exists in your class)
+                if hasattr(self.reconstructor, 'print_ser_debug_info'):
                     self.reconstructor.print_ser_debug_info()
 
-                    # 5. UI SETUP: Sync sliders using corrected metadata
-                    actual_w = self.reconstructor.width
-                    actual_h = self.reconstructor.height
-                    actual_frames = self.reconstructor.frame_count
-                    
-                    # Update horizontal slider for X-position/Wavelength
-                    self.x_slider.setRange(0, actual_w)
-                    
-                    # Setup Spectrum View (Top Box)
-                    # We use the high-quality average frame instead of frame 0
-                    # This makes the spectral line much easier to see
-                    self.spectrum_view.getView().setAspectLocked(False)
-                    self.spectrum_view.getView().invertY(False) # Correct sensor orientation
-                    # .T is required for pyqtgraph display convention
+                # 5. UI SETUP: Sync sliders using corrected metadata
+                actual_w = self.reconstructor.width   # Spectral (128)
+                actual_h = self.reconstructor.height  # Slit (3056)
+                actual_frames = self.reconstructor.frame_count
+                
+                # Update horizontal slider for X-position/Wavelength
+                self.x_slider.setRange(0, actual_w)
+                
+                # Setup Spectrum View (Top Box)
+                self.spectrum_view.getView().setAspectLocked(False)
+                self.spectrum_view.getView().invertY(False) 
+                
+                # Use .T for pyqtgraph display (Width becomes the 3056 slit)
+                if avg_frame is not None:
                     self.spectrum_view.setImage(avg_frame.T, autoLevels=True)
                     self.spectrum_view.autoLevels() 
-                    
-                    # Setup Main View (Disk View)
-                    self.sun_view.getView().setAspectLocked(False)
-                    
-                    # Enable controls
-                    self.reconstruct_btn.setEnabled(True)
+                
+                # Setup Main View (Disk View)
+                self.sun_view.getView().setAspectLocked(False)
+                
+                # Enable controls
+                self.reconstruct_btn.setEnabled(True)
+                if hasattr(self, 'btn_preview_raw'):
                     self.btn_preview_raw.setEnabled(True) 
-                    
-                    # 6. STATUS UPDATE: Display curve detection results
+                
+                # 6. STATUS UPDATE: Display curve detection results
+                # Added safety check for coeff_b to prevent the Traceback
+                if hasattr(self.reconstructor, 'coeff_b'):
                     shape_type = "Frown (n)" if self.reconstructor.coeff_b < 0 else "Smile (u)"
-                    self.status_bar.showMessage(
-                        f"Loaded: {actual_w}x{actual_h} | Frames: {actual_frames} | Curve: {shape_type}"
-                    )
+                else:
+                    shape_type = "Unknown"
 
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    self.status_bar.showMessage(f"Error loading file: {e}")
+                self.status_bar.showMessage(
+                    f"Loaded: {actual_w}x{actual_h} | Frames: {actual_frames} | Curve: {shape_type}"
+                )
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.status_bar.showMessage(f"Error loading file: {e}")
 
 
 
@@ -728,13 +766,17 @@ class PySolexUI(QMainWindow):
             self.reconstructor.xy_multiplier = 1.0
 
         # 2. Determine Tuning Target
-        if override_pixel is not None:
-            tuning_val = float(override_pixel)
-        else:
-            try:
-                tuning_val = float(self.line_x_input.text())
-            except ValueError:
-                tuning_val = 6562.81
+#        if override_pixel is not None:
+#            tuning_val = float(override_pixel)
+#        else:
+#            try:
+#               tuning_val = float(self.line_x_input.text())
+#            except ValueError:
+#                tuning_val = 6562.81
+                #tuning_val = 6561
+        #The commented code above totally trolled the box, now the wavel box works again
+        tuning_val = float(self.line_x_input.text())
+
 
         # 3. Collect Processing Parameters
         sharpen = self.sharpen_check.isChecked() if hasattr(self, 'sharpen_check') else False
@@ -1011,6 +1053,6 @@ class PySolexUI(QMainWindow):
                     x_val = int(mouse_point.x())
                     
                     # Update UI and trigger reconstruction
-                    #self.x_slider.setValue(x_val)
-                    #self.line_x_input.setText(str(x_val))
-                    #self.run_reconstruction()
+                    self.x_slider.setValue(x_val)
+                    self.line_x_input.setText(str(x_val))
+                    self.run_reconstruction()

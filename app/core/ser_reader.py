@@ -66,7 +66,7 @@ class SERReader:
             # 4. FIX NOISE (ENDIANNESS)
             if self.bit_depth == 16:
                 # '<u2' forces Little-Endian, fixing the salt-and-pepper noise
-                return np.frombuffer(data, dtype='>u2')
+                return np.frombuffer(data, dtype='<u2')
             else:
                 # Standard 8-bit for old data
                 return np.frombuffer(data, dtype='u1')
