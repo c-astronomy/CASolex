@@ -1,1 +1,5 @@
-pip install pySide6 numpy opencv-python pyalpaca pyindi-client
+pySide6
+numpy
+opencv-python
+pyalpaca
+pyindi-client
